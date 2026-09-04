@@ -1,0 +1,32 @@
+# Go
+/crm-bisync
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.txt
+coverage.html
+vendor/
+
+# Runtime state (the file-backed store writes here)
+/state/
+*.wal
+*.snapshot
+
+# Secrets
+.env
+.env.*
+!.env.example
+config.json
+!config.example.json
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+*.log
