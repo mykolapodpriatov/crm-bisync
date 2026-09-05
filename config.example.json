@@ -1,0 +1,59 @@
+{
+  "log_level": "info",
+  "listen": "127.0.0.1:8080",
+  "state_dir": "./state",
+  "workers": 4,
+  "max_attempts": 6,
+
+  "connectors": [
+    {
+      "name": "hubspot",
+      "driver": "hubspot",
+      "echo_window": "5m",
+      "watermark_overlap": "2m",
+      "rate_limit": { "rate_per_sec": 8, "burst": 16 },
+      "options": {
+        "api_version": "2026-03",
+        "token_env": "HUBSPOT_TOKEN",
+        "webhook_secret_env": "HUBSPOT_WEBHOOK_SECRET"
+      }
+    },
+    {
+      "name": "twenty",
+      "driver": "twenty",
+      "echo_window": "2m",
+      "watermark_overlap": "1m",
+      "rate_limit": { "rate_per_sec": 20, "burst": 40 },
+      "options": {
+        "base_url": "http://localhost:3000",
+        "token_env": "TWENTY_TOKEN",
+        "webhook_secret_env": "TWENTY_WEBHOOK_SECRET"
+      }
+    }
+  ],
+
+  "syncs": [
+    {
+      "kind": "contact",
+      "left": "hubspot",
+      "right": "twenty",
+      "direction": "bidirectional",
+      "identity": {
+        "keys": ["email"],
+        "on_ambiguous": "review"
+      },
+      "conflict": {
+        "default": "newest_wins",
+        "per_field": {
+          "email": "left_wins"
+        }
+      },
+      "fields": [
+        { "canonical": "email",      "left": "email",     "right": "emails.primaryEmail", "transform": "email_normalize" },
+        { "canonical": "first_name", "left": "firstname", "right": "name.firstName" },
+        { "canonical": "last_name",  "left": "lastname",  "right": "name.lastName" },
+        { "canonical": "created_at", "left": "createdate", "right": "createdAt", "direction": "push" }
+      ]
+    }
+  ]
+}
