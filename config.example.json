@@ -52,7 +52,7 @@
         { "canonical": "email",      "left": "email",     "right": "emails.primaryEmail", "transform": "email_normalize" },
         { "canonical": "first_name", "left": "firstname", "right": "name.firstName" },
         { "canonical": "last_name",  "left": "lastname",  "right": "name.lastName" },
-        { "canonical": "created_at", "left": "createdate", "right": "createdAt", "direction": "push" }
+        { "canonical": "created_at", "left": "createdate", "right": "createdAt", "direction": "left_to_right" }
       ]
     }
   ]

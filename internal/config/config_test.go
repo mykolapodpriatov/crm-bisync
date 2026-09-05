@@ -261,3 +261,53 @@ func TestShippedExampleConfigIsValid(t *testing.T) {
 		t.Fatalf("config.example.json does not load: %v", err)
 	}
 }
+
+// Directions are named after the sides, not after "push" and "pull". This
+// engine syncs two peers that are both CRMs, and calling one of two equal
+// peers the push target is how a field's direction ends up backwards in
+// review. The old names must not quietly keep working.
+func TestPushAndPullAreNoLongerValidDirections(t *testing.T) {
+	for _, old := range []string{"push", "pull"} {
+		body := mutate(t, minimal, func(m map[string]any) {
+			m["syncs"].([]any)[0].(map[string]any)["direction"] = old
+		})
+		if _, err := Load(write(t, body)); err == nil {
+			t.Errorf("direction %q was accepted", old)
+		}
+	}
+}
+
+func TestSideNamedDirectionsAreAccepted(t *testing.T) {
+	for _, dir := range []string{"left_to_right", "right_to_left", "bidirectional"} {
+		body := mutate(t, minimal, func(m map[string]any) {
+			m["syncs"].([]any)[0].(map[string]any)["direction"] = dir
+		})
+		if _, err := Load(write(t, body)); err != nil {
+			t.Errorf("direction %q was rejected: %v", dir, err)
+		}
+	}
+}
+
+// The conversion into the mapping package must not lose anything, or a
+// transform configured by an operator silently stops running.
+func TestMappingSpecCarriesEveryField(t *testing.T) {
+	c, err := Load(filepath.Join("..", "..", "config.example.json"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	spec := c.Syncs[0].MappingSpec()
+
+	if spec.Kind != c.Syncs[0].Kind || spec.Direction != c.Syncs[0].Direction {
+		t.Fatalf("spec header = %+v", spec)
+	}
+	if len(spec.Fields) != len(c.Syncs[0].Fields) {
+		t.Fatalf("spec has %d fields, config has %d", len(spec.Fields), len(c.Syncs[0].Fields))
+	}
+	for i, f := range c.Syncs[0].Fields {
+		got := spec.Fields[i]
+		if got.Canonical != f.Canonical || got.Left != f.Left || got.Right != f.Right ||
+			got.Transform != f.Transform || got.Direction != f.Direction {
+			t.Fatalf("field %d lost something: %+v vs %+v", i, got, f)
+		}
+	}
+}
