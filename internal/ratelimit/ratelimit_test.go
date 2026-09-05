@@ -276,7 +276,8 @@ func TestSetGivesAnUnregisteredConnectorALimiterAnyway(t *testing.T) {
 	if stray.Rate() <= 0 {
 		t.Fatalf("the default limiter has rate %v", stray.Rate())
 	}
-	if set.For("hubspot") != set.For("hubspot") {
+	first, second := set.For("hubspot"), set.For("hubspot")
+	if first != second {
 		t.Fatal("the set handed out two buckets for one connector")
 	}
 }
