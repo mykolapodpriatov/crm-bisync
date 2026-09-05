@@ -82,6 +82,15 @@ const (
 	CollDeliveries = "deliveries"
 	CollDLQ        = "dlq"
 	CollReview     = "review"
+	// CollKeys indexes deterministic identity keys to the records that hold
+	// them, so matching a record against its peer is a local lookup rather
+	// than a remote search. Not every CRM can search by an arbitrary field,
+	// and the ones that can charge an API call for it.
+	CollKeys = "keys"
+	// CollKeyOwner records which keys a record currently occupies, so that a
+	// record whose email changes releases the old key instead of leaving a
+	// stale entry that would match somebody else.
+	CollKeyOwner = "key_owner"
 )
 
 // AllCollections is every collection the engine uses, for sweeps and for the
@@ -95,6 +104,8 @@ var AllCollections = []string{
 	CollDeliveries,
 	CollDLQ,
 	CollReview,
+	CollKeys,
+	CollKeyOwner,
 }
 
 // live reports whether a record with the given expiry is visible at now. A

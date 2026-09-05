@@ -13,6 +13,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"crm-bisync/internal/mapping"
 )
 
 // Duration is a time.Duration that reads as a Go duration string in JSON, so
@@ -107,11 +109,14 @@ type FieldPair struct {
 }
 
 var (
-	validDirections  = []string{"push", "pull", "bidirectional"}
+	// The direction and transform vocabularies live in the mapping package,
+	// which owns their semantics. Restating them here is how a transform gets
+	// added in one place and silently rejected in the other.
+	validDirections  = mapping.Directions()
+	knownTransforms  = mapping.Known()
 	validAmbiguous   = []string{"review", "create", "skip"}
 	validConflicts   = []string{"left_wins", "right_wins", "newest_wins", "field_level", "review"}
 	validLogLevels   = []string{"debug", "info", "warn", "error"}
-	knownTransforms  = []string{"", "email_normalize", "domain_normalize", "trim", "lowercase"}
 	errNoConnectors  = errors.New("connectors: at least two connectors are required")
 	errNoSyncsAtAll  = errors.New("syncs: at least one sync is required")
 	errNoFieldsInAny = errors.New("fields: a sync with no fields would write nothing")
@@ -171,7 +176,7 @@ func (c *Config) applyDefaults() {
 	}
 	for i := range c.Syncs {
 		if c.Syncs[i].Direction == "" {
-			c.Syncs[i].Direction = "bidirectional"
+			c.Syncs[i].Direction = mapping.Bidirectional
 		}
 		if c.Syncs[i].Identity.OnAmbiguous == "" {
 			c.Syncs[i].Identity.OnAmbiguous = "review"
@@ -315,6 +320,26 @@ func (s Sync) CanonicalNames() []string {
 		names = append(names, f.Canonical)
 	}
 	return names
+}
+
+// MappingSpec converts the configured sync into the shape the mapping package
+// builds a Mapper from.
+func (s Sync) MappingSpec() mapping.Spec {
+	spec := mapping.Spec{
+		Kind:      s.Kind,
+		Direction: s.Direction,
+		Fields:    make([]mapping.FieldSpec, 0, len(s.Fields)),
+	}
+	for _, f := range s.Fields {
+		spec.Fields = append(spec.Fields, mapping.FieldSpec{
+			Canonical: f.Canonical,
+			Left:      f.Left,
+			Right:     f.Right,
+			Transform: f.Transform,
+			Direction: f.Direction,
+		})
+	}
+	return spec
 }
 
 func oneOf(v string, allowed []string) bool {
