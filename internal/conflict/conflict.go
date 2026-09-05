@@ -242,6 +242,17 @@ func (r *Resolver) Resolve(left, right State, fields []string) Resolution {
 		Diffs:     diff(left, right, fields),
 	}
 
+	// Digests can say both sides moved while the sides still agree: an
+	// unmapped field changed, or two people made the same edit, or a pair has
+	// only just been matched and has no recorded base at all. There is nothing
+	// to write and nothing to decide, and escalating here would put a question
+	// with no answer in front of a person.
+	if len(res.Diffs) == 0 {
+		res.Action = Nothing
+		res.Reason = "the two sides already agree on every mapped field"
+		return res
+	}
+
 	switch situation {
 	case Unchanged:
 		res.Action = Nothing

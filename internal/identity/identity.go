@@ -96,6 +96,14 @@ func New(typed *store.Typed, kind string, keys []string, onAmbiguous string) *Re
 	return &Resolver{typed: typed, kind: kind, keys: keys, onAmbiguous: onAmbiguous}
 }
 
+// Keys returns the deterministic keys this resolver matches on.
+func (r *Resolver) Keys() []string {
+	return append([]string(nil), r.keys...)
+}
+
+// OnAmbiguous returns the configured ambiguity policy.
+func (r *Resolver) OnAmbiguous() string { return r.onAmbiguous }
+
 // keyEntry is the stored set of records holding one key value.
 type keyEntry struct {
 	Refs []store.Ref `json:"refs"`

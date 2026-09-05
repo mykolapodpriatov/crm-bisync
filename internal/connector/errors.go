@@ -47,6 +47,15 @@ func (k Kind) String() string {
 }
 
 // Error is a classified connector failure.
+//
+// Returning one is a statement that the peer answered and the answer was not
+// success, which means the request was not applied. A connector that does not
+// know whether the request was applied, because it timed out or the connection
+// dropped after the bytes went out, must return the raw error instead. The
+// engine reads the difference: an answered failure clears the in-flight mark
+// and retries cleanly, while an unanswered one keeps it and forces identity to
+// be re-resolved, because a blind retry of a create that may have landed is
+// how a dropped connection becomes a duplicate contact.
 type Error struct {
 	Connector string
 	Op        string
@@ -103,3 +112,13 @@ func Retryable(err error) bool {
 
 // IsNotFound is a convenience for the common branch.
 func IsNotFound(err error) bool { return KindOf(err) == KindNotFound }
+
+// Answered reports whether the peer replied.
+//
+// True means the request was not applied and may be retried from scratch.
+// False means the outcome is unknown, and a write must not be repeated
+// without first re-establishing what the peer holds.
+func Answered(err error) bool {
+	var ce *Error
+	return errors.As(err, &ce)
+}
