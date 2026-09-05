@@ -140,6 +140,31 @@ func (e *Engine) process(ctx context.Context, t *task) (Outcome, error) {
 		return OutcomeEcho, nil
 	}
 
+	// Stale, not new. Run only once an event has survived echo classification,
+	// so a genuine echo is still counted as one: this check is for the
+	// near-miss or plainly foreign event that nonetheless describes fromRef no
+	// later than what is already on record for it.
+	//
+	// That is what a redelivered webhook, or a poll re-reading its overlap
+	// window, looks like once some OTHER event for the same record has
+	// already landed: the payload is real and someone really sent it, but it
+	// is not telling us anything we have not already applied, and processing
+	// it can overwrite a newer value with an older one. TestWritesStopAfterTheLastEdit
+	// and its neighbours found this the hard way, as an unbounded oscillation
+	// between two sides that both keep "winning" with stale data.
+	//
+	// This only ever compares one peer's own timestamps against each other,
+	// never one peer's clock against another's, so the skew a peer's clock
+	// may have relative to another's (which the watermark overlap already
+	// exists to absorb) does not enter into it.
+	if fromSnap, ok, err := e.typed.Snapshot(fromRef); err != nil {
+		return OutcomeSkipped, err
+	} else if ok && !rec.UpdatedAt.IsZero() && !fromSnap.SourceUpdatedAt.IsZero() &&
+		!rec.UpdatedAt.After(fromSnap.SourceUpdatedAt) {
+		e.count(func(st *Stats) { st.NoChange++ })
+		return OutcomeNoChange, nil
+	}
+
 	// Index before resolving, so that the far side can find this record on a
 	// later pass even if this one ends in a review or a skip.
 	if err := s.Identity.Index(fromRef, canonical); err != nil {
@@ -169,7 +194,7 @@ func (e *Engine) process(ctx context.Context, t *task) (Outcome, error) {
 	}
 
 	if targetRef.RemoteID == "" {
-		return e.create(ctx, s, from, to, fromRef, canonical, hash)
+		return e.create(ctx, s, from, to, fromRef, canonical, hash, rec.UpdatedAt)
 	}
 	return e.reconcile(ctx, s, from, to, fromRef, targetRef, canonical, hash, rec.UpdatedAt)
 }
@@ -212,6 +237,7 @@ func (e *Engine) create(
 	fromRef store.Ref,
 	canonical map[string]any,
 	fromHash string,
+	updatedAt time.Time,
 ) (Outcome, error) {
 	targetRef := store.Ref{Connector: to.Name, Kind: s.Kind}
 
@@ -228,12 +254,23 @@ func (e *Engine) create(
 	// The far side now holds what we sent, as far as we can know without
 	// asking it again.
 	leftValues, rightValues := sides(from, canonical, canonical)
-	if err := e.commitPair(s, leftRef, rightRef, leftValues, rightValues); err != nil {
+	leftUpdated, rightUpdated := sides(from, updatedAt, writeTimestamp(result, e.clock.Now()))
+	if err := e.commitPair(s, leftRef, rightRef, leftValues, rightValues, leftUpdated, rightUpdated); err != nil {
 		return OutcomeSkipped, err
 	}
 
 	e.count(func(st *Stats) { st.Created++ })
 	return OutcomeCreated, nil
+}
+
+// writeTimestamp reports when a write landed, preferring the connector's own
+// answer over our clock: the connector knows what it actually stored, and our
+// clock only knows when we asked.
+func writeTimestamp(result connector.WriteResult, fallback time.Time) time.Time {
+	if !result.UpdatedAt.IsZero() {
+		return result.UpdatedAt
+	}
+	return fallback
 }
 
 // reconcile decides what to do about a pair that is already linked.
@@ -286,13 +323,14 @@ func (e *Engine) reconcile(
 		current, err := e.get(ctx, to, s.Kind, targetRef.RemoteID)
 		switch {
 		case connector.IsNotFound(err):
-			// The link points at a record that no longer exists. Dropping the
-			// link and creating is the only reading that does not quietly stop
-			// syncing this pair forever.
-			if err := e.dropLink(s, fromRef, targetRef); err != nil {
-				return OutcomeSkipped, err
-			}
-			return e.create(ctx, s, from, to, fromRef, canonical, fromHash)
+			// The far side no longer has the record this link points at. The
+			// safe reading is that it was deleted, not that something is
+			// wrong with our own state: recreating here is how a legitimate
+			// delete on one side gets silently undone by an update for the
+			// same pair that was already in flight when the delete landed.
+			// Catch the near side up to match instead, through the same
+			// idempotent path an ordinary propagated delete uses.
+			return e.deletePropagated(ctx, s, targetRef, from, fromRef)
 		case err != nil:
 			return OutcomeSkipped, err
 		}
@@ -326,38 +364,52 @@ func (e *Engine) reconcile(
 	}
 
 	leftFinal, rightFinal := leftState.Fields, rightState.Fields
+	// Defaults to what reading each side reported. A write updates the side
+	// it touched to the connector's own answer for when that write landed,
+	// which is what lets a later, older-dated event be recognised as stale
+	// rather than reprocessed as if it were new.
+	leftUpdated, rightUpdated := leftState.UpdatedAt, rightState.UpdatedAt
+
 	switch res.Action {
 	case conflict.WriteLeft:
-		if _, _, err := e.write(ctx, s, s.Left, leftRef, rightRef, res.Values, leftState.Fields); err != nil {
+		result, _, err := e.write(ctx, s, s.Left, leftRef, rightRef, res.Values, leftState.Fields)
+		if err != nil {
 			return OutcomeSkipped, err
 		}
 		leftFinal = merge(leftState.Fields, res.Values)
+		leftUpdated = writeTimestamp(result, e.clock.Now())
 
 	case conflict.WriteRight:
-		if _, _, err := e.write(ctx, s, s.Right, rightRef, leftRef, res.Values, rightState.Fields); err != nil {
+		result, _, err := e.write(ctx, s, s.Right, rightRef, leftRef, res.Values, rightState.Fields)
+		if err != nil {
 			return OutcomeSkipped, err
 		}
 		rightFinal = merge(rightState.Fields, res.Values)
+		rightUpdated = writeTimestamp(result, e.clock.Now())
 
 	case conflict.WriteBoth:
 		// Each side is missing something the other has. The two writes touch
 		// disjoint fields by construction, so neither is conditional on the
 		// other and the order does not matter.
-		if _, _, err := e.write(ctx, s, s.Left, leftRef, rightRef, res.LeftValues, leftState.Fields); err != nil {
+		leftResult, _, err := e.write(ctx, s, s.Left, leftRef, rightRef, res.LeftValues, leftState.Fields)
+		if err != nil {
 			return OutcomeSkipped, err
 		}
-		if _, _, err := e.write(ctx, s, s.Right, rightRef, leftRef, res.RightValues, rightState.Fields); err != nil {
+		rightResult, _, err := e.write(ctx, s, s.Right, rightRef, leftRef, res.RightValues, rightState.Fields)
+		if err != nil {
 			return OutcomeSkipped, err
 		}
 		leftFinal = merge(leftState.Fields, res.LeftValues)
 		rightFinal = merge(rightState.Fields, res.RightValues)
+		leftUpdated = writeTimestamp(leftResult, e.clock.Now())
+		rightUpdated = writeTimestamp(rightResult, e.clock.Now())
 	}
 
 	// Committed even when nothing was written. That is the pass that records
 	// the base for a pair which has only just been matched, and without it
 	// every later pass would see two sides that both "changed" since a sync
 	// that never happened, and escalate for ever.
-	if err := e.commitPair(s, leftRef, rightRef, leftFinal, rightFinal); err != nil {
+	if err := e.commitPair(s, leftRef, rightRef, leftFinal, rightFinal, leftUpdated, rightUpdated); err != nil {
 		return OutcomeSkipped, err
 	}
 
@@ -423,6 +475,15 @@ func (e *Engine) write(
 	payloadHash := model.SnapshotHash(predicted, s.canonical)
 	key := idem.Key(s.Name, s.Kind, sourceRef, targetRef, payloadHash)
 
+	// Checked before idem.Begin, on purpose. Begin marks the key in-flight the
+	// moment it returns Proceed, and a wait here means the call has not been
+	// attempted at all: marking it in-flight anyway would make the next
+	// attempt see Recheck for a write that never happened, and re-resolve
+	// identity for nothing.
+	if wait := e.reserve(target); wait > 0 {
+		return connector.WriteResult{}, false, rateLimited(target.Name, wait)
+	}
+
 	previous, decision, err := e.idem.Begin(key)
 	if err != nil {
 		return connector.WriteResult{}, false, err
@@ -464,10 +525,6 @@ func (e *Engine) write(
 		if err := e.recordOrigin(targetRef, payloadHash); err != nil {
 			return connector.WriteResult{}, false, err
 		}
-	}
-
-	if err := target.Bucket.Wait(ctx); err != nil {
-		return connector.WriteResult{}, false, err
 	}
 
 	record := model.Record{Kind: s.Kind, RemoteID: targetRef.RemoteID, Fields: fields}
@@ -527,6 +584,7 @@ func (e *Engine) commitPair(
 	s *Sync,
 	leftRef, rightRef store.Ref,
 	leftValues, rightValues map[string]any,
+	leftUpdatedAt, rightUpdatedAt time.Time,
 ) error {
 	now := e.clock.Now()
 
@@ -535,16 +593,18 @@ func (e *Engine) commitPair(
 	}
 
 	for _, side := range []struct {
-		ref    store.Ref
-		values map[string]any
+		ref       store.Ref
+		values    map[string]any
+		updatedAt time.Time
 	}{
-		{leftRef, leftValues},
-		{rightRef, rightValues},
+		{leftRef, leftValues, leftUpdatedAt},
+		{rightRef, rightValues, rightUpdatedAt},
 	} {
 		if err := e.typed.SetSnapshot(side.ref, store.Snapshot{
-			Hash:   model.SnapshotHash(side.values, s.canonical),
-			Values: side.values,
-			At:     now,
+			Hash:            model.SnapshotHash(side.values, s.canonical),
+			Values:          side.values,
+			At:              now,
+			SourceUpdatedAt: side.updatedAt,
 		}); err != nil {
 			return err
 		}
@@ -585,40 +645,67 @@ func (e *Engine) processDelete(
 		return OutcomeSkipped, permanent(fmt.Errorf("link for %s names no peer", fromRef))
 	}
 
+	return e.deletePropagated(ctx, s, fromRef, to, peer)
+}
+
+// deletePropagated makes target's record match sourceRef's absence: it
+// removes target's record and drops the link between them.
+//
+// It is shared by two callers who reach the same conclusion from different
+// directions. An ordinary delete event says outright "sourceRef is gone,
+// catch target up." reconcile reaches it sideways, discovering only while
+// about to write that a linked far-side record has vanished. Recreating
+// there instead, as read-then-write code reflexively does, is how a
+// legitimate delete on one side gets silently undone by an update for the
+// same pair that was already in flight; deleting to match is the reading
+// that cannot be wrong in the case that matters, and it is what the far side
+// will conclude on its own next poll besides.
+func (e *Engine) deletePropagated(
+	ctx context.Context,
+	s *Sync,
+	sourceRef store.Ref,
+	target *Peer,
+	targetRef store.Ref,
+) (Outcome, error) {
 	if e.plan != nil {
 		e.plan.record(PlannedChange{
 			Sync:   s.Name,
 			Action: ActionDelete,
-			Source: fromRef,
-			Target: peer,
+			Source: sourceRef,
+			Target: targetRef,
 		})
-		if err := e.dropLink(s, fromRef, peer); err != nil {
+		if err := e.dropLink(s, sourceRef, targetRef); err != nil {
 			return OutcomeSkipped, err
 		}
 		e.count(func(st *Stats) { st.Deleted++ })
 		return OutcomeDeleted, nil
 	}
 
-	key := idem.Key(s.Name, s.Kind, fromRef, peer, "delete")
+	key := idem.Key(s.Name, s.Kind, sourceRef, targetRef, "delete")
+
+	// Checked before Begin, for the same reason as in write: a wait here means
+	// nothing was attempted, and marking the key in-flight anyway would be a
+	// lie the next attempt has to untangle.
+	if wait := e.reserve(target); wait > 0 {
+		return OutcomeSkipped, rateLimited(target.Name, wait)
+	}
+
 	_, decision, err := e.idem.Begin(key)
 	if err != nil {
 		return OutcomeSkipped, err
 	}
 	if decision == idem.Proceed {
-		if err := to.Bucket.Wait(ctx); err != nil {
+		if err := target.Conn.Delete(ctx, s.Kind, targetRef.RemoteID, key); err != nil {
+			e.noteFailure(target, err)
 			return OutcomeSkipped, err
 		}
-		if err := to.Conn.Delete(ctx, s.Kind, peer.RemoteID, key); err != nil {
-			e.noteFailure(to, err)
-			return OutcomeSkipped, err
-		}
-		to.Bucket.Success()
-		if err := e.idem.Commit(key, store.IdemResult{RemoteID: peer.RemoteID}); err != nil {
+		target.Bucket.Success()
+		if err := e.idem.Commit(key, store.IdemResult{RemoteID: targetRef.RemoteID}); err != nil {
 			return OutcomeSkipped, err
 		}
 	}
 
-	if err := e.dropLink(s, fromRef, peer); err != nil {
+	if err := e.dropLink(s, sourceRef, targetRef); err != nil {
 		return OutcomeSkipped, err
 	}
 
@@ -650,8 +737,8 @@ func (e *Engine) dropLink(s *Sync, a, b store.Ref) error {
 
 // get reads one record, under the peer's rate limit.
 func (e *Engine) get(ctx context.Context, p *Peer, kind, remoteID string) (model.Record, error) {
-	if err := p.Bucket.Wait(ctx); err != nil {
-		return model.Record{}, err
+	if wait := e.reserve(p); wait > 0 {
+		return model.Record{}, rateLimited(p.Name, wait)
 	}
 	rec, err := p.Conn.Get(ctx, kind, remoteID)
 	if err != nil {
@@ -666,6 +753,40 @@ func (e *Engine) get(ctx context.Context, p *Peer, kind, remoteID string) (model
 func (e *Engine) noteFailure(p *Peer, err error) {
 	if connector.KindOf(err) == connector.KindRateLimited {
 		p.Bucket.Reject(connector.RetryAfterOf(err))
+	}
+}
+
+// reserve asks a peer's bucket for permission to make one call, without
+// blocking for it.
+//
+// It checks a peer-imposed block first, without touching the token balance:
+// that is what a 429 leaves behind, and spending a token on a call we are not
+// making would double the wait once the block lifts and this attempt is
+// retried. Ordinary token exhaustion still goes through Reserve, which is the
+// ordinary case a healthy peer produces under load.
+//
+// The caller never sleeps on the result. A non-zero wait is turned into a
+// retryable error and the task is requeued with that wait as its backoff,
+// which is what keeps a worker from parking in a channel read while other
+// peers' work sits ready in the queue.
+func (e *Engine) reserve(p *Peer) time.Duration {
+	if wait := p.Bucket.BlockedFor(); wait > 0 {
+		return wait
+	}
+	return p.Bucket.Reserve()
+}
+
+// rateLimited builds the error reserve's caller returns when capacity is not
+// available yet. It is a connector.Error so the existing retry machinery
+// (Retryable, RetryAfterOf) already knows what to do with it without a
+// special case.
+func rateLimited(peerName string, wait time.Duration) error {
+	return &connector.Error{
+		Connector:  peerName,
+		Op:         "ratelimit",
+		Kind:       connector.KindRateLimited,
+		RetryAfter: wait,
+		Err:        fmt.Errorf("waiting for rate limit capacity"),
 	}
 }
 

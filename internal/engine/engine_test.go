@@ -371,3 +371,85 @@ func TestValidateRejectsAMappingTheSchemaDoesNotSupport(t *testing.T) {
 func refFor(connectorName, remoteID string) store.Ref {
 	return store.Ref{Connector: connectorName, Kind: "contact", RemoteID: remoteID}
 }
+
+// A record whose linked counterpart vanished must not be resurrected.
+//
+// This is what reconcile's read-before-write turns into if a 404 is read as
+// "something is wrong, recreate" instead of "the far side deleted this":
+// an update already queued for the near side, processed after the far side
+// has genuinely been deleted, brings the deleted contact back to life on the
+// side that legitimately removed it. Found by the chaos harness's "no loss"
+// invariant on the very first real run.
+func TestReconcileDeletesRatherThanResurrectsWhenFarSideVanishes(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+
+	left := h.left.ExternalUpsert("contact", "", map[string]any{
+		"email": "ann@example.com", "firstname": "Ann",
+	})
+	h.cycle()
+	right := h.right.Records("contact")[0]
+
+	// Queue an update on the near side, and delete the far side's record
+	// before that update is ever processed. Both are real edits an operator
+	// could make within the same moment.
+	h.left.ExternalUpsert("contact", left.RemoteID, map[string]any{"firstname": "Annabel"})
+	h.right.ExternalDelete("contact", right.RemoteID)
+
+	h.cycles(3)
+
+	if h.right.Count("contact") != 0 {
+		t.Fatalf("the deleted record was resurrected on the right: %d records", h.right.Count("contact"))
+	}
+	if h.left.Count("contact") != 0 {
+		t.Fatalf("the delete did not propagate to the left: %d records", h.left.Count("contact"))
+	}
+}
+
+// An event describing an old value must not overwrite a newer one that some
+// other event already applied for the same record.
+//
+// This is what a redelivered webhook, or a poll re-reading its overlap
+// window, looks like once a different event for the same pair has already
+// landed. Found by the chaos harness: two genuinely concurrent edits kept
+// alternating forever because each side's stale, already-applied event kept
+// being reprocessed as if it were new.
+func TestAStaleEventDoesNotOverwriteANewerOne(t *testing.T) {
+	h := newHarness(t, harnessOptions{})
+
+	left := h.left.ExternalUpsert("contact", "", map[string]any{
+		"email": "ann@example.com", "firstname": "Ann",
+	})
+	h.cycle()
+	// h.cycle syncs by polling, not by webhook delivery, so the webhook the
+	// initial create queued is still sitting there; clear it before the
+	// webhooks under test are queued.
+	h.left.DrainWebhooks()
+
+	// The webhook for this edit is captured now, with "Old" embedded in it,
+	// and deliberately held back rather than delivered immediately.
+	h.left.ExternalUpsert("contact", left.RemoteID, map[string]any{"firstname": "Old"})
+	stale := h.left.DrainWebhooks()
+	if len(stale) != 1 {
+		t.Fatalf("setup: got %d webhooks, want 1", len(stale))
+	}
+
+	// A second, later edit supersedes it, and this one is allowed to sync
+	// normally.
+	h.left.ExternalUpsert("contact", left.RemoteID, map[string]any{"firstname": "New"})
+	h.cycle()
+
+	if got := h.field(h.right, "first_name"); got != "New" {
+		t.Fatalf("the newer edit did not land: %v", got)
+	}
+
+	// The stale webhook, describing "Old", arrives only now.
+	h.post(stale[0].Request("/webhook/left"))
+	h.engine.Drain(context.Background())
+
+	if got := h.field(h.right, "first_name"); got != "New" {
+		t.Fatalf("a stale, already-superseded event overwrote the newer value: got %v, want New", got)
+	}
+	if got := h.field(h.left, "firstname"); got != "New" {
+		t.Fatalf("the stale event changed the source of truth itself: got %v, want New", got)
+	}
+}

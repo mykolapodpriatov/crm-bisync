@@ -129,6 +129,11 @@ type runner struct {
 	live    map[string]bool
 	deleted map[string]bool
 	nextID  int
+
+	// pending holds polls whose work has not yet reached a terminal state, so
+	// their watermark cannot advance yet. TryCommit is retried on every tick;
+	// a result drops out once its work settles, one way or another.
+	pending []*engine.PollResult
 }
 
 var epoch = time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
@@ -175,8 +180,13 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 	for round := 0; round < opts.Rounds; round++ {
 		if round == restartAt {
 			// A restart loses the queue and keeps the store, which is exactly
-			// what a crash leaves behind.
+			// what a crash leaves behind. Anything still pending belonged to
+			// the engine we are stopping, its watermark never advanced for
+			// it, and it is dropped rather than committed: the next engine's
+			// first poll re-reads that state from the peer, which is the
+			// whole reason the mark is only ever moved past settled work.
 			r.engine.Stop()
+			r.pending = nil
 			if err := r.build(); err != nil {
 				return nil, err
 			}
@@ -249,14 +259,26 @@ func (r *runner) build() error {
 }
 
 // tick is one pass of the world: deliver whatever the peers queued, poll,
-// process, and move time forward.
+// process, move time forward, and commit whatever settled.
+//
+// This does not use Engine.Cycle. Cycle's Commit blocks until every task from
+// this poll is terminal, which is correct for a daemon whose background
+// workers keep draining on a real clock while the poller waits, and wrong
+// here: this harness is one goroutine driving a manual clock, so a task
+// waiting out a backoff would block forever with nobody left to advance the
+// clock that backoff is waiting on. TryCommit is the non-blocking form: a
+// result that is not ready yet stays in r.pending and is tried again next
+// tick, which costs nothing, because the watermark it is waiting on has not
+// moved either way.
 func (r *runner) tick(ctx context.Context, advance time.Duration) error {
 	r.deliver()
-	if err := r.engine.Cycle(ctx); err != nil {
-		// A peer that refused to answer is part of the scenario, not a
-		// failure of it. The mark simply does not move.
-		_ = err
-	}
+
+	// A peer that refused to answer, including one still rate limited, is
+	// part of the scenario rather than a failure of it: its watermark simply
+	// does not move, and the next tick's poll tries it again.
+	newResults, _ := r.engine.PollAll(ctx)
+	r.pending = append(r.pending, newResults...)
+
 	r.deliver()
 	r.engine.Drain(ctx)
 
@@ -266,6 +288,25 @@ func (r *runner) tick(ctx context.Context, advance time.Duration) error {
 	r.engine.Drain(ctx)
 
 	r.clock.Advance(advance)
+
+	// One more drain, so that a retry whose backoff just elapsed gets to run
+	// before this tick decides what is and is not settled, rather than
+	// waiting a whole extra tick to be noticed.
+	r.deliver()
+	r.engine.Drain(ctx)
+
+	kept := r.pending[:0]
+	for _, res := range r.pending {
+		committed, err := res.TryCommit(r.engine)
+		if err != nil {
+			return err
+		}
+		if !committed {
+			kept = append(kept, res)
+		}
+	}
+	r.pending = kept
+
 	return nil
 }
 

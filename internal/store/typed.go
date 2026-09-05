@@ -128,6 +128,16 @@ type Snapshot struct {
 	Hash   string         `json:"hash"`
 	Values map[string]any `json:"values,omitempty"`
 	At     time.Time      `json:"at"`
+	// SourceUpdatedAt is the record's own modification time, as this peer
+	// reported it, at the moment this snapshot was taken. It is compared only
+	// against later readings from the SAME peer, to recognise an event that
+	// describes this record no later than what is already on record here as
+	// stale rather than new: a redelivered webhook or a poll re-reading its
+	// overlap window, once some other event for the same record has already
+	// landed. It is never compared across peers, so the clock skew a peer may
+	// have relative to another (which the watermark overlap already exists to
+	// absorb) does not enter into it.
+	SourceUpdatedAt time.Time `json:"source_updated_at,omitempty"`
 }
 
 // Snapshot returns the record as it stood at the last successful sync.

@@ -59,8 +59,12 @@ func (e *Engine) Poll(ctx context.Context, s *Sync, p *Peer) (*PollResult, error
 	now := e.clock.Now()
 
 	for pages := 0; ; pages++ {
-		if err := p.Bucket.Wait(ctx); err != nil {
-			return nil, err
+		// Non-blocking, like every other call into a peer. A poll that is
+		// still rate limited simply tries again next cycle; nothing here
+		// should sleep, because the caller may be driving a manual clock that
+		// nobody else is left to advance.
+		if wait := e.reserve(p); wait > 0 {
+			return nil, fmt.Errorf("polling %s for %s: %w", p.Name, s.Kind, rateLimited(p.Name, wait))
 		}
 		page, err := p.Conn.ListChanged(ctx, s.Kind, since, cursor)
 		if err != nil {
@@ -134,6 +138,36 @@ func (r *PollResult) Commit(ctx context.Context, e *Engine) error {
 		}
 	}
 	return e.marks.Advance(r.Peer.Name, r.Sync.Kind, r.Highest)
+}
+
+// Done reports whether every task the poll produced has reached a terminal
+// state, without waiting for it.
+func (r *PollResult) Done() bool {
+	for _, t := range r.Tasks {
+		select {
+		case <-t.done:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// TryCommit advances the watermark if the poll's work is done, and reports
+// whether it did.
+//
+// It never blocks. Commit's wait is correct for a daemon, where background
+// workers keep draining the queue on a real clock while the poller goroutine
+// waits; it is wrong for a single-goroutine driver working through its own
+// clock, because nothing else is left to advance that clock while Commit
+// blocks. TryCommit is what such a driver calls instead: retry it once per
+// pass, and whatever is not yet done stays pending for the next one, exactly
+// as durability here already assumes, since the mark has not moved either way.
+func (r *PollResult) TryCommit(e *Engine) (bool, error) {
+	if !r.Done() {
+		return false, nil
+	}
+	return true, e.marks.Advance(r.Peer.Name, r.Sync.Kind, r.Highest)
 }
 
 // readablePeers returns the peers of a sync whose changes are worth reading.
