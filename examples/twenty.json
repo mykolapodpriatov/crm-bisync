@@ -1,0 +1,30 @@
+{
+  "objects": {
+    "contact": {
+      "fields": [
+        { "name": "emails.primaryEmail" },
+        { "name": "name.firstName" },
+        { "name": "name.lastName" },
+        { "name": "createdAt" }
+      ],
+      "records": [
+        {
+          "id": "tw-1",
+          "fields": {
+            "emails": { "primaryEmail": "ann.lee@example.com" },
+            "name": { "firstName": "Anna", "lastName": "Lee" },
+            "createdAt": "2026-01-04"
+          }
+        },
+        {
+          "id": "tw-9",
+          "fields": {
+            "emails": { "primaryEmail": "dee@contoso.test" },
+            "name": { "firstName": "Dee", "lastName": "Okafor" },
+            "createdAt": "2026-04-19"
+          }
+        }
+      ]
+    }
+  }
+}

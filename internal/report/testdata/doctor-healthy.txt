@@ -1,0 +1,4 @@
+ok    store ./state       readable and writable
+ok    queue review queue  empty
+
+All 2 checks passed.

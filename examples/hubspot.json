@@ -1,0 +1,41 @@
+{
+  "objects": {
+    "contact": {
+      "fields": [
+        { "name": "email" },
+        { "name": "firstname" },
+        { "name": "lastname" },
+        { "name": "createdate", "type": "datetime", "read_only": true }
+      ],
+      "records": [
+        {
+          "id": "hs-1",
+          "fields": {
+            "email": "Ann.Lee@Example.com",
+            "firstname": "Ann",
+            "lastname": "Lee",
+            "createdate": "2026-01-04"
+          }
+        },
+        {
+          "id": "hs-2",
+          "fields": {
+            "email": "bo@northwind.test",
+            "firstname": "Bo",
+            "lastname": "Vance",
+            "createdate": "2026-02-11"
+          }
+        },
+        {
+          "id": "hs-3",
+          "fields": {
+            "email": "cass@fabrikam.test",
+            "firstname": "Cass",
+            "lastname": "Ibarra",
+            "createdate": "2026-03-02"
+          }
+        }
+      ]
+    }
+  }
+}

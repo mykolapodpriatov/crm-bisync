@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -285,11 +286,17 @@ func (t *Typed) GetQueueItem(collection, id string) (QueueItem, bool, error) {
 }
 
 // ListQueueItems returns items oldest first.
+//
+// Sorted on the decoded timestamp rather than on the key, because not every
+// queue can afford a chronological identifier: the review queue keys on the
+// question so that one disagreement is one row however many events surface
+// it, and that key says nothing about when it was asked.
 func (t *Typed) ListQueueItems(collection string, limit int) ([]QueueItem, error) {
-	entries, err := t.S.List(collection, limit)
+	entries, err := t.S.List(collection, 0)
 	if err != nil {
 		return nil, err
 	}
+
 	out := make([]QueueItem, 0, len(entries))
 	for _, e := range entries {
 		var item QueueItem
@@ -297,6 +304,16 @@ func (t *Typed) ListQueueItems(collection string, limit int) ([]QueueItem, error
 			return nil, fmt.Errorf("store: decode queue item %s: %w", e.Key, err)
 		}
 		out = append(out, item)
+	}
+
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }

@@ -22,7 +22,11 @@ vendor/
 .env
 .env.*
 !.env.example
-config.json
+# Anchored to the repository root on purpose. An unanchored "config.json"
+# also swallowed examples/config.json, which is committed and is what the
+# README's output is generated from; the tests that read it passed locally
+# and failed in CI, which is the whole failure mode of an over-broad ignore.
+/config.json
 !config.example.json
 
 # Editors / OS

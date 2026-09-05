@@ -27,6 +27,9 @@ type harness struct {
 	right  *fake.Fake
 	engine *engine.Engine
 	store  store.Store
+	// opts is kept so that a test can build a second engine over the same
+	// world, which is what a dry run is.
+	opts engine.Options
 }
 
 type harnessOptions struct {
@@ -138,7 +141,7 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 		}},
 	}
 
-	e, err := engine.New(engine.Options{
+	h.opts = engine.Options{
 		Config: cfg,
 		Store:  h.store,
 		Clock:  c,
@@ -148,7 +151,9 @@ func newHarness(t *testing.T, opts harnessOptions) *harness {
 			"right": h.right,
 		},
 		Seed: 7,
-	})
+	}
+
+	e, err := engine.New(h.opts)
 	if err != nil {
 		t.Fatalf("engine.New: %v", err)
 	}

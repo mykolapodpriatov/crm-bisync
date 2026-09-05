@@ -1,0 +1,26 @@
+{
+  "changes": [
+    {
+      "sync": "contact:hubspot-twenty",
+      "action": "create",
+      "source": {
+        "connector": "hubspot",
+        "kind": "contact",
+        "remote_id": "hs-2"
+      },
+      "target": {
+        "connector": "twenty",
+        "kind": "contact",
+        "remote_id": "planned-1"
+      },
+      "fields": [
+        {
+          "field": "email",
+          "value": "bo@northwind.test"
+        }
+      ]
+    }
+  ],
+  "reviews": null,
+  "dead_letters": null
+}

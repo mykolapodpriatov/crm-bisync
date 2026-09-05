@@ -1,0 +1,8 @@
+ok    store ./state                   readable and writable
+ok    connector hubspot/contact       4 fields
+FAIL  connector twenty/contact        twenty.describe: auth: token expired
+ok    mapping contact:hubspot-twenty  4 fields, bidirectional
+ok    watermark hubspot/contact       3m0s behind
+FAIL  queue dead-letter queue         2 items that exhausted their attempts
+
+2 of 6 checks failed.
