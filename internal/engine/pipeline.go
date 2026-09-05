@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -150,7 +152,9 @@ func (e *Engine) process(ctx context.Context, t *task) (Outcome, error) {
 	}
 	switch res.Outcome {
 	case identity.Review:
-		return e.queueReview(s, fromRef, res.Reason, map[string]any{
+		// Keyed on the record itself: an ambiguous match has no pair yet, so
+		// one unresolved question per source record is exactly right.
+		return e.queueReview(s, fromRef.String(), fromRef, res.Reason, map[string]any{
 			"candidates": refStrings(res.Candidates),
 			"values":     canonical,
 		})
@@ -308,7 +312,12 @@ func (e *Engine) reconcile(
 	res := s.Conflict.Resolve(leftState, rightState, s.canonical)
 
 	if res.Action == conflict.Escalate {
-		return e.queueReview(s, fromRef, res.Reason, map[string]any{
+		// Keyed on the pair, not on the record that happened to surface it.
+		// Both sides' events reach this line for one disagreement, and two
+		// rows describing one decision is two people resolving it, or one
+		// person resolving it twice.
+		pair := leftRef.String() + " <-> " + rightRef.String()
+		return e.queueReview(s, pair, fromRef, res.Reason, map[string]any{
 			"situation": res.Situation.String(),
 			"policy":    res.Policy,
 			"diffs":     res.Diffs,
@@ -380,6 +389,34 @@ func (e *Engine) write(
 		// or narrowed away by a per-field direction. Not an error, and not a
 		// request either.
 		return connector.WriteResult{}, false, nil
+	}
+
+	if e.plan != nil {
+		// A dry run stops here. Everything after this point is the network and
+		// the bookkeeping that follows it; everything before it is the
+		// decision, which is exactly what a plan is meant to show.
+		action := ActionUpdate
+		if targetRef.RemoteID == "" {
+			action = ActionCreate
+		}
+		// The direction filter has already run, so the plan reports the
+		// fields that would land rather than the ones that were offered. A
+		// plan showing a read-only or narrowed field is a plan that lies
+		// about the one thing anybody reads it for.
+		id := e.plan.record(PlannedChange{
+			Sync:   s.Name,
+			Action: action,
+			Source: sourceRef,
+			Target: targetRef,
+			Fields: namedValues(only(values, s.Mapper.WritableNames(target.Side))),
+		})
+		if targetRef.RemoteID == "" {
+			// A synthetic identifier, so that the rest of the pass links and
+			// snapshots against something and a later record's plan is right
+			// about this one.
+			return connector.WriteResult{RemoteID: id, Created: true}, true, nil
+		}
+		return connector.WriteResult{RemoteID: targetRef.RemoteID}, true, nil
 	}
 
 	predicted := merge(base, values)
@@ -548,6 +585,20 @@ func (e *Engine) processDelete(
 		return OutcomeSkipped, permanent(fmt.Errorf("link for %s names no peer", fromRef))
 	}
 
+	if e.plan != nil {
+		e.plan.record(PlannedChange{
+			Sync:   s.Name,
+			Action: ActionDelete,
+			Source: fromRef,
+			Target: peer,
+		})
+		if err := e.dropLink(s, fromRef, peer); err != nil {
+			return OutcomeSkipped, err
+		}
+		e.count(func(st *Stats) { st.Deleted++ })
+		return OutcomeDeleted, nil
+	}
+
 	key := idem.Key(s.Name, s.Kind, fromRef, peer, "delete")
 	_, decision, err := e.idem.Begin(key)
 	if err != nil {
@@ -619,8 +670,33 @@ func (e *Engine) noteFailure(p *Peer, err error) {
 }
 
 // queueReview records a decision the engine refused to make.
-func (e *Engine) queueReview(s *Sync, ref store.Ref, reason string, payload map[string]any) (Outcome, error) {
-	if err := e.enqueueItem(store.CollReview, s, ref, reason, 0, payload); err != nil {
+//
+// subject identifies the question rather than the event that raised it, so a
+// disagreement seen from both sides is one row.
+func (e *Engine) queueReview(s *Sync, subject string, ref store.Ref, reason string, payload map[string]any) (Outcome, error) {
+	id := reviewID(s.Name, subject)
+
+	// The first sighting keeps its timestamp. A question that has been open
+	// since Tuesday should not look like it arrived just now every time
+	// something notices it again.
+	if _, exists, err := e.typed.GetQueueItem(store.CollReview, id); err != nil {
+		return OutcomeSkipped, err
+	} else if exists {
+		return OutcomeReviewed, nil
+	}
+
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return OutcomeSkipped, fmt.Errorf("engine: encode review payload: %w", err)
+	}
+	if err := e.typed.PutQueueItem(store.CollReview, store.QueueItem{
+		ID:        id,
+		Sync:      s.Name,
+		Ref:       ref,
+		Reason:    reason,
+		CreatedAt: e.clock.Now(),
+		Payload:   raw,
+	}); err != nil {
 		return OutcomeSkipped, err
 	}
 	e.count(func(st *Stats) { st.Reviewed++ })
@@ -672,6 +748,23 @@ func (e *Engine) enqueueItem(
 		Attempts:  attempts,
 		Payload:   raw,
 	})
+}
+
+// reviewID is a stable identifier for one open question.
+func reviewID(sync, subject string) string {
+	sum := sha256.Sum256([]byte(sync + "\x00" + subject))
+	return "review-" + hex.EncodeToString(sum[:16])
+}
+
+// only copies the named fields out of a value set.
+func only(values map[string]any, names []string) map[string]any {
+	out := make(map[string]any, len(names))
+	for _, name := range names {
+		if v, ok := values[name]; ok {
+			out[name] = v
+		}
+	}
+	return out
 }
 
 // lockKey names the logical record a task is about.

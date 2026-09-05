@@ -1,0 +1,22 @@
+contact:hubspot-twenty
+  create on twenty
+    from hubspot:contact/hs-2
+    email = "bo@northwind.test"
+    first_name = "Bo"
+    score = 42
+    phone = (unset)
+  update hubspot:contact/hs-7
+    from twenty:contact/tw-4
+    first_name = "Cass"
+  delete twenty:contact/tw-9
+    because hubspot:contact/hs-9 was deleted
+
+Waiting for a decision (1)
+  hubspot:contact/hs-1
+    both sides changed 1s apart, inside the 2s clock tolerance, so which is newer is not knowable
+
+Would fail (1)
+  twenty:contact/tw-3
+    property "email" failed a validation rule
+
+1 to create, 1 to update, 1 to delete, 1 waiting for a decision, 1 that would fail.

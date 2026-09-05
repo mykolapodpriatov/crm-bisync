@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -45,6 +46,12 @@ func (d Duration) D() time.Duration { return time.Duration(d) }
 
 // Config is the whole file.
 type Config struct {
+	// Dir is the directory the configuration was loaded from. It is not part
+	// of the file: Load fills it in so that paths inside the file resolve
+	// relative to the file rather than to whatever directory the binary
+	// happened to be started in.
+	Dir string `json:"-"`
+
 	LogLevel    string      `json:"log_level"`
 	Listen      string      `json:"listen"`
 	StateDir    string      `json:"state_dir"`
@@ -56,6 +63,10 @@ type Config struct {
 
 // Connector is one side of a sync.
 type Connector struct {
+	// BaseDir is the configuration's own directory, copied here so a driver
+	// can resolve a relative path without being handed the whole config.
+	BaseDir string `json:"-"`
+
 	Name   string `json:"name"`
 	Driver string `json:"driver"`
 	// EchoWindow is how long an outbound write stays in the origin log. It has
@@ -137,6 +148,7 @@ func Load(path string) (*Config, error) {
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	c.Dir = filepath.Dir(path)
 	c.applyDefaults()
 	if err := c.Validate(); err != nil {
 		return nil, err
@@ -161,6 +173,7 @@ func (c *Config) applyDefaults() {
 		c.MaxAttempts = 6
 	}
 	for i := range c.Connectors {
+		c.Connectors[i].BaseDir = c.Dir
 		if c.Connectors[i].EchoWindow == 0 {
 			c.Connectors[i].EchoWindow = Duration(5 * time.Minute)
 		}

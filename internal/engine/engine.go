@@ -89,6 +89,10 @@ type Options struct {
 	// Seed makes retry jitter reproducible. Tests set it; production leaves
 	// it zero and gets the clock.
 	Seed int64
+	// DryRun records writes instead of sending them. Callers normally reach
+	// this through Plan, which also arranges for the state the run produces
+	// to be thrown away.
+	DryRun bool
 }
 
 // Engine runs the syncs.
@@ -108,6 +112,10 @@ type Engine struct {
 
 	queue *workQueue
 	locks *keyedMutex
+
+	// plan is non-nil in a dry run, and is what the writes go into instead of
+	// the network.
+	plan *planRecorder
 
 	rndMu sync.Mutex
 	rnd   *rand.Rand
@@ -156,6 +164,9 @@ func New(opts Options) (*Engine, error) {
 		locks:   newKeyedMutex(),
 		rnd:     rand.New(rand.NewSource(seed)),
 		stopped: make(chan struct{}),
+	}
+	if opts.DryRun {
+		e.plan = &planRecorder{}
 	}
 
 	windows := map[string]time.Duration{}
