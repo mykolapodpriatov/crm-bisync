@@ -360,18 +360,18 @@ func TestRefKeysCannotCollide(t *testing.T) {
 		a := store.Ref{Connector: "hub", Kind: "spot", RemoteID: "1"}
 		b := store.Ref{Connector: "hubspot", Kind: "", RemoteID: "1"}
 
-		if err := ty.SetSnapshot(a, "hash-a"); err != nil {
+		if err := ty.SetSnapshot(a, store.Snapshot{Hash: "hash-a"}); err != nil {
 			t.Fatalf("SetSnapshot: %v", err)
 		}
-		if err := ty.SetSnapshot(b, "hash-b"); err != nil {
+		if err := ty.SetSnapshot(b, store.Snapshot{Hash: "hash-b"}); err != nil {
 			t.Fatalf("SetSnapshot: %v", err)
 		}
 		got, _, err := ty.Snapshot(a)
 		if err != nil {
 			t.Fatalf("Snapshot: %v", err)
 		}
-		if got != "hash-a" {
-			t.Fatalf("refs collided: got %q", got)
+		if got.Hash != "hash-a" {
+			t.Fatalf("refs collided: got %q", got.Hash)
 		}
 	})
 }
@@ -512,4 +512,33 @@ func TestQueueIDsSortChronologically(t *testing.T) {
 	if !(early < sameInstant) {
 		t.Fatalf("%q should sort before %q", early, sameInstant)
 	}
+}
+
+// The snapshot carries the values, not just the digest, because field-level
+// conflict resolution is a three-way merge and a three-way merge needs a base.
+func TestSnapshotRoundTripsItsValues(t *testing.T) {
+	eachStore(t, func(t *testing.T, s store.Store, _ *clock.Manual) {
+		ty := store.NewTyped(s)
+		ref := store.Ref{Connector: "hubspot", Kind: "contact", RemoteID: "1"}
+
+		want := store.Snapshot{
+			Hash:   "abc",
+			Values: map[string]any{"email": "ann@example.com", "score": float64(42)},
+			At:     epoch,
+		}
+		if err := ty.SetSnapshot(ref, want); err != nil {
+			t.Fatalf("SetSnapshot: %v", err)
+		}
+
+		got, ok, err := ty.Snapshot(ref)
+		if err != nil || !ok {
+			t.Fatalf("Snapshot = %v,%v", ok, err)
+		}
+		if got.Hash != want.Hash || !got.At.Equal(want.At) {
+			t.Fatalf("Snapshot = %+v, want %+v", got, want)
+		}
+		if got.Values["email"] != "ann@example.com" || got.Values["score"] != float64(42) {
+			t.Fatalf("values did not round-trip: %#v", got.Values)
+		}
+	})
 }

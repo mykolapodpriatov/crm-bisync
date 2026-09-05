@@ -113,20 +113,42 @@ func (t *Typed) SetWatermark(connector, kind string, at time.Time) error {
 	return t.S.Put(CollWatermarks, connector+"\x00"+kind, raw, time.Time{})
 }
 
-// Snapshot is the digest of a remote record at the last successful sync. It
-// is what distinguishes "changed since we synced" from "changed just now",
-// which is the question conflict detection actually asks.
-func (t *Typed) Snapshot(r Ref) (string, bool, error) {
-	raw, ok, err := t.S.Get(CollSnapshots, r.key())
-	if err != nil || !ok {
-		return "", false, err
-	}
-	return string(raw), true, nil
+// Snapshot is a record as it stood at the last successful sync.
+//
+// It holds the values as well as the digest, and the values are what make
+// field-level conflict resolution possible at all: merging two edits is a
+// three-way merge, and a three-way merge needs the base. Storing only the
+// digest answers "did this record change" but never "which field changed",
+// so every field of a changed record looks contested and the merge degrades
+// into an escalation.
+//
+// The cost is bounded: only mapped fields are stored, and only one version.
+type Snapshot struct {
+	Hash   string         `json:"hash"`
+	Values map[string]any `json:"values,omitempty"`
+	At     time.Time      `json:"at"`
 }
 
-// SetSnapshot records the digest.
-func (t *Typed) SetSnapshot(r Ref, hash string) error {
-	return t.S.Put(CollSnapshots, r.key(), []byte(hash), time.Time{})
+// Snapshot returns the record as it stood at the last successful sync.
+func (t *Typed) Snapshot(r Ref) (Snapshot, bool, error) {
+	raw, ok, err := t.S.Get(CollSnapshots, r.key())
+	if err != nil || !ok {
+		return Snapshot{}, false, err
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return Snapshot{}, false, fmt.Errorf("store: decode snapshot: %w", err)
+	}
+	return snap, true, nil
+}
+
+// SetSnapshot records the record as it now stands.
+func (t *Typed) SetSnapshot(r Ref, snap Snapshot) error {
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		return fmt.Errorf("store: encode snapshot: %w", err)
+	}
+	return t.S.Put(CollSnapshots, r.key(), raw, time.Time{})
 }
 
 // Origin is one entry in the write log echo suppression consumes.
