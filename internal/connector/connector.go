@@ -62,6 +62,9 @@ type Page struct {
 	Cursor string
 }
 
+// HasMore reports whether another page follows.
+func (p Page) HasMore() bool { return p.Cursor != "" }
+
 // FieldSpec is one field on a remote object.
 type FieldSpec struct {
 	Name     string
