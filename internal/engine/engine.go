@@ -58,14 +58,6 @@ type Sync struct {
 	canonical []string
 }
 
-// peerBySide returns the peer sitting on a side.
-func (s *Sync) peerBySide(side mapping.Side) *Peer {
-	if side == mapping.Left {
-		return s.Left
-	}
-	return s.Right
-}
-
 // peerByName returns the peer with a connector name.
 func (s *Sync) peerByName(name string) (*Peer, bool) {
 	switch name {

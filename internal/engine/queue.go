@@ -80,27 +80,6 @@ func (q *workQueue) push(t *task) bool {
 	return true
 }
 
-// pushDelayed adds a task that becomes ready at t.NotBefore.
-func (q *workQueue) pushDelayed(t *task) bool {
-	q.mu.Lock()
-	if q.closed {
-		q.mu.Unlock()
-		t.finish()
-		return false
-	}
-	q.delayed = append(q.delayed, t)
-	// Sorted so the soonest retry is always first, which keeps promote from
-	// scanning the whole set on every poll of the queue.
-	sort.SliceStable(q.delayed, func(i, j int) bool {
-		return q.delayed[i].NotBefore.Before(q.delayed[j].NotBefore)
-	})
-	q.depth++
-	q.mu.Unlock()
-
-	q.signal()
-	return true
-}
-
 func (q *workQueue) signal() {
 	select {
 	case q.wake <- struct{}{}:
