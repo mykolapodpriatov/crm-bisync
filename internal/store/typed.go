@@ -170,9 +170,14 @@ func (t *Typed) TakeOrigin(r Ref, hash string) (Origin, bool, error) {
 }
 
 // IdemResult is what a write produced, remembered so a retry can skip it.
+//
+// InFlight marks intent recorded before the call went out. It is the only way
+// to tell "this write never happened" from "this write may have landed and we
+// lost the response", and those two need different recovery.
 type IdemResult struct {
 	RemoteID  string    `json:"remote_id"`
 	Created   bool      `json:"created"`
+	InFlight  bool      `json:"in_flight,omitempty"`
 	WrittenAt time.Time `json:"written_at"`
 }
 
