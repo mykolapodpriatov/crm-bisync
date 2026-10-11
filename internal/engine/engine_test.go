@@ -201,6 +201,50 @@ func TestDeletePropagatesAndStops(t *testing.T) {
 	}
 }
 
+// A delete that fails before Commit leaves an in-flight mark. The retry must
+// call Delete again. Treating that recheck as "already deleted" drops the
+// link and counts a record that is still on the peer.
+func TestAFailedDeleteIsRetriedAndThenLands(t *testing.T) {
+	// A hard delete disappears from the store, so a later poll cannot see it.
+	// Soft delete is what puts the id on the deleted page.
+	caps := connector.Caps{SoftDelete: true}
+	h := newHarness(t, harnessOptions{caps: &caps})
+	rec := h.left.ExternalUpsert("contact", "", map[string]any{"email": "ann@example.com", "firstname": "Ann"})
+	h.cycle()
+	if h.right.Count("contact") != 1 {
+		t.Fatalf("setup: right has %d records", h.right.Count("contact"))
+	}
+
+	h.left.ExternalDelete("contact", rec.RemoteID)
+	ctx := context.Background()
+	if _, err := h.engine.PollAll(ctx); err != nil {
+		t.Fatalf("PollAll: %v", err)
+	}
+	h.right.SetFaults(serverErrorEvery(1))
+	h.engine.Drain(ctx)
+
+	if h.right.Count("contact") != 1 {
+		t.Fatal("the injected failure did not keep the record")
+	}
+	if h.engine.Stats().Retried == 0 {
+		t.Fatal("the failed delete was not retried")
+	}
+	if h.engine.Stats().Deleted != 0 {
+		t.Fatalf("Deleted = %d before the delete landed", h.engine.Stats().Deleted)
+	}
+
+	h.right.SetFaults(fake.Faults{})
+	h.clock.Advance(time.Minute)
+	h.engine.Drain(ctx)
+
+	if got := h.right.Count("contact"); got != 0 {
+		t.Fatalf("the retry did not delete: right has %d records", got)
+	}
+	if got := h.right.Calls("delete"); got != 2 {
+		t.Fatalf("right delete calls = %d, want 2", got)
+	}
+}
+
 // A one-way sync must never write to its source, whatever happens on the far
 // side. This is also what stops our own writes coming back on such a sync.
 func TestAOneWaySyncNeverWritesBack(t *testing.T) {
