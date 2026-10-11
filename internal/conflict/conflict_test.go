@@ -317,6 +317,44 @@ func TestPolicyForFallsBackToTheDefault(t *testing.T) {
 	}
 }
 
+// The right side is a minute newer, so newest_wins would copy its email.
+// email is left_wins, so the older left value is the one that gets written.
+func TestPerFieldPolicyBeatsTheDefault(t *testing.T) {
+	r := resolver(t, conflict.NewestWins, map[string]string{"email": conflict.LeftWins})
+	base := map[string]any{"email": "a@b.c", "first_name": "A"}
+	left := state(map[string]any{"email": "left@b.c", "first_name": "A"}, base, epoch)
+	right := state(map[string]any{"email": "right@b.c", "first_name": "A"}, base, epoch.Add(time.Minute))
+
+	res := r.Resolve(left, right, fields)
+	if res.Action != conflict.WriteRight {
+		t.Fatalf("action = %s, want write_right", res.Action)
+	}
+	if res.Values["email"] != "left@b.c" {
+		t.Fatalf("email = %v, want left@b.c", res.Values["email"])
+	}
+}
+
+func TestPerFieldPoliciesCanWriteBothSides(t *testing.T) {
+	r := resolver(t, conflict.Review, map[string]string{
+		"email":      conflict.LeftWins,
+		"first_name": conflict.RightWins,
+	})
+	base := map[string]any{"email": "a@b.c", "first_name": "A"}
+	left := state(map[string]any{"email": "left@b.c", "first_name": "Left"}, base, epoch)
+	right := state(map[string]any{"email": "right@b.c", "first_name": "Right"}, base, epoch)
+
+	res := r.Resolve(left, right, fields)
+	if res.Action != conflict.WriteBoth {
+		t.Fatalf("action = %s, want write_both", res.Action)
+	}
+	if res.RightValues["email"] != "left@b.c" {
+		t.Fatalf("right email = %v", res.RightValues["email"])
+	}
+	if res.LeftValues["first_name"] != "Right" {
+		t.Fatalf("left first_name = %v", res.LeftValues["first_name"])
+	}
+}
+
 func TestEveryPolicyIsValid(t *testing.T) {
 	for _, p := range conflict.Policies() {
 		if !conflict.IsValidPolicy(p) {
