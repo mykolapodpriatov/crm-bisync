@@ -604,6 +604,20 @@ func (e *Engine) processDelete(
 	if err != nil {
 		return OutcomeSkipped, err
 	}
+	if decision == idem.Recheck {
+		// The peer id is already known, so repeating this delete is safe.
+		// A failed delete returns before Commit and leaves the mark in
+		// flight, so the next Begin is a recheck. Dropping the link on that
+		// path reports the record gone while it is still on the peer. Clear
+		// the stale mark and take a fresh one, the same way an update of a
+		// known target does.
+		if err := e.idem.Abandon(key); err != nil {
+			return OutcomeSkipped, err
+		}
+		if _, decision, err = e.idem.Begin(key); err != nil {
+			return OutcomeSkipped, err
+		}
+	}
 	if decision == idem.Proceed {
 		if err := to.Bucket.Wait(ctx); err != nil {
 			return OutcomeSkipped, err
