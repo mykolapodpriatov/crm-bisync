@@ -277,6 +277,13 @@ func (r *Resolver) Resolve(left, right State, fields []string) Resolution {
 
 // resolveConflict handles the case both sides moved.
 func (r *Resolver) resolveConflict(left, right State, fields []string, res Resolution) Resolution {
+	// A per-field override has to win for that field even when the default
+	// would pick the other side. With no overrides the paths below stay as
+	// they were: one policy for the whole record.
+	if len(r.perField) > 0 {
+		return r.resolvePerField(left, right, res)
+	}
+
 	// Field level is the only policy that looks at fields rather than sides,
 	// so it takes its own path.
 	if r.defaultPolicy == FieldLevel {
@@ -329,6 +336,103 @@ func (r *Resolver) newest(left, right State, fields []string, res Resolution) Re
 	res.Values = pick(right.Fields, fields)
 	res.Reason = fmt.Sprintf("the right side changed %s later", gap)
 	return res
+}
+
+// resolvePerField applies PolicyFor to each disagreed field. Fields that
+// name different winners are written to both sides. A field whose policy
+// cannot pick a winner escalates the whole record, because writing the
+// others would leave a mix neither side edited.
+func (r *Resolver) resolvePerField(left, right State, res Resolution) Resolution {
+	res.Policy = r.defaultPolicy
+	res.LeftValues = map[string]any{}
+	res.RightValues = map[string]any{}
+
+	var blocked []string
+	for i, d := range res.Diffs {
+		switch r.PolicyFor(d.Field) {
+		case LeftWins:
+			res.RightValues[d.Field] = d.Left
+			res.Diffs[i].Winner = WriteRight
+		case RightWins:
+			res.LeftValues[d.Field] = d.Right
+			res.Diffs[i].Winner = WriteLeft
+		case NewestWins:
+			winner, ok := r.clockWinner(left, right)
+			if !ok {
+				blocked = append(blocked, d.Field)
+				continue
+			}
+			if winner == WriteRight {
+				res.RightValues[d.Field] = d.Left
+				res.Diffs[i].Winner = WriteRight
+			} else {
+				res.LeftValues[d.Field] = d.Right
+				res.Diffs[i].Winner = WriteLeft
+			}
+		case FieldLevel:
+			if !left.HasBase() || !right.HasBase() || (d.LeftChanged && d.RightChanged) {
+				blocked = append(blocked, d.Field)
+				continue
+			}
+			if d.LeftChanged {
+				res.RightValues[d.Field] = d.Left
+				res.Diffs[i].Winner = WriteRight
+			} else if d.RightChanged {
+				res.LeftValues[d.Field] = d.Right
+				res.Diffs[i].Winner = WriteLeft
+			}
+		default:
+			blocked = append(blocked, d.Field)
+		}
+	}
+
+	if len(blocked) > 0 {
+		res.Action = Escalate
+		res.LeftValues = nil
+		res.RightValues = nil
+		res.Reason = fmt.Sprintf("both sides changed and %s has no automatic winner", joinFields(blocked))
+		return res
+	}
+
+	switch {
+	case len(res.LeftValues) > 0 && len(res.RightValues) > 0:
+		res.Action = WriteBoth
+		res.Reason = "both sides changed and per-field policies name both winners"
+	case len(res.RightValues) > 0:
+		res.Action = WriteRight
+		res.Values = res.RightValues
+		res.RightValues = nil
+		res.LeftValues = nil
+		res.Reason = "both sides changed; per-field policy keeps the left values"
+	case len(res.LeftValues) > 0:
+		res.Action = WriteLeft
+		res.Values = res.LeftValues
+		res.LeftValues = nil
+		res.RightValues = nil
+		res.Reason = "both sides changed; per-field policy keeps the right values"
+	default:
+		res.Action = Nothing
+		res.LeftValues = nil
+		res.RightValues = nil
+		res.Reason = "the digests differ but no mapped field does"
+	}
+	return res
+}
+
+// clockWinner reports which side is newer by more than the skew tolerance.
+// WriteRight means the left value is the one to keep.
+func (r *Resolver) clockWinner(left, right State) (Action, bool) {
+	gap := left.UpdatedAt.Sub(right.UpdatedAt)
+	if gap < 0 {
+		gap = -gap
+	}
+	if gap <= r.skew {
+		return 0, false
+	}
+	if left.UpdatedAt.After(right.UpdatedAt) {
+		return WriteRight, true
+	}
+	return WriteLeft, true
 }
 
 // merge applies FieldLevel: keep every edit that does not collide, escalate
